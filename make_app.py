@@ -30,11 +30,13 @@ exec {python} {script}{args} >> "$LOG" 2>&1
 """
 
 
+def _sips(*args, text=False):
+    """Every sips call is checked and kept quiet; image_size also wants its stdout."""
+    return subprocess.run(["sips", *args], check=True, capture_output=True, text=text)
+
+
 def image_size(path):
-    out = subprocess.run(
-        ["sips", "-g", "pixelWidth", "-g", "pixelHeight", path],
-        check=True, capture_output=True, text=True,
-    ).stdout
+    out = _sips("-g", "pixelWidth", "-g", "pixelHeight", path, text=True).stdout
     dims = dict(line.strip().split(": ") for line in out.splitlines()[1:])
     return int(dims["pixelWidth"]), int(dims["pixelHeight"])
 
@@ -45,20 +47,14 @@ def build_icon(image, icns_path):
     with tempfile.TemporaryDirectory() as tmp:
         side = min(image_size(image))
         square = os.path.join(tmp, "square.png")
-        subprocess.run(
-            ["sips", "-s", "format", "png", "--cropToHeightWidth", str(side), str(side),
-             image, "--out", square],
-            check=True, capture_output=True,
-        )
+        _sips("-s", "format", "png", "--cropToHeightWidth", str(side), str(side),
+              image, "--out", square)
         iconset = os.path.join(tmp, "AppIcon.iconset")
         os.mkdir(iconset)
         for size in ICON_SIZES:
             for suffix, px in (("", size), ("@2x", size * 2)):
-                subprocess.run(
-                    ["sips", "-z", str(px), str(px), square,
-                     "--out", os.path.join(iconset, f"icon_{size}x{size}{suffix}.png")],
-                    check=True, capture_output=True,
-                )
+                _sips("-z", str(px), str(px), square,
+                      "--out", os.path.join(iconset, f"icon_{size}x{size}{suffix}.png"))
         subprocess.run(["iconutil", "-c", "icns", iconset, "-o", icns_path], check=True)
 
 

@@ -15,6 +15,7 @@ key is used because macOS reports the two Option keys as distinct device bits, a
 these events are consumed, so LEFT Option keeps doing word-jump as normal.
     rightopt-Left / Right   cycle terminal windows
     rightopt-Up   / Down    cycle text-editor windows
+    rightopt-Space          window picker; pick a row by number or click
     rightopt-\\              next wallpaper
     rightopt-C              center the current front window
     rightopt-Escape         exit, restoring every window this app moved
@@ -52,7 +53,7 @@ from ApplicationServices import (
     AXUIElementCopyAttributeValue, AXUIElementCreateApplication,
     AXIsProcessTrustedWithOptions, AXUIElementPerformAction,
     AXUIElementSetAttributeValue, AXValueCreate, AXValueGetValue,
-    kAXValueCGPointType,
+    kAXValueCGPointType, kAXValueCGSizeType,
 )
 from Foundation import (NSAppleScript, NSMakePoint, NSMakeRect, NSObject,
                         NSPointInRect, NSRunLoop, NSString)
@@ -113,10 +114,9 @@ DEV_RIGHT_ALT = 0x40
 
 DEBUG = bool(os.environ.get("FOCUS_MODE_DEBUG"))
 
-# The hole must hug the window exactly. Any positive pad exposes a ring of
+# The hole hugs the window exactly — no pad. Any pad at all exposes a ring of
 # whatever is behind the window (i.e. the real desktop) around its edge.
 HOLE_RADIUS = 10.0
-HOLE_PAD = 0.0
 MIN_WIN_W, MIN_WIN_H = 200, 120
 
 
@@ -143,7 +143,7 @@ def ax_size(element):
     value = _ax_copy(element, "AXSize")
     if value is None:
         return None
-    ok, size = AXValueGetValue(value, 2, None)  # kAXValueCGSizeType
+    ok, size = AXValueGetValue(value, kAXValueCGSizeType, None)
     return (size.width, size.height) if ok else None
 
 
@@ -189,7 +189,12 @@ def short_title(title):
     return f"{folder} · {task}" if folder else task
 
 
-_SCRIPTS = {}
+_SCRIPTS: dict[str, NSAppleScript] = {}
+
+
+def _script_error(error):
+    """The message out of an NSAppleScript error dictionary."""
+    return error.get("NSAppleScriptErrorMessage", error)
 
 
 def _sysevents_activate(app_name):
@@ -205,9 +210,18 @@ def _sysevents_activate(app_name):
         script = NSAppleScript.alloc().initWithSource_(
             f'tell application "System Events" to set frontmost of process '
             f'"{app_name}" to true')
-        script.compileAndReturnError_(None)
+        compiled, error = script.compileAndReturnError_(None)
+        if not compiled:
+            print(f"could not compile the activation script for {app_name!r}: "
+                  f"{_script_error(error)}", flush=True)
+            return
         _SCRIPTS[app_name] = script
-    script.executeAndReturnError_(None)
+    _, error = script.executeAndReturnError_(None)
+    if error is not None:
+        # Cross-app cycling needs the System Events automation grant, which is a
+        # SEPARATE permission from Accessibility. Without a message here the cycle
+        # silently does nothing and there is no way to tell why.
+        print(f"could not activate {app_name!r}: {_script_error(error)}", flush=True)
 
 
 def warm_sysevents():
@@ -273,8 +287,7 @@ class ScrimView(NSView):
         point = self.convertPoint_fromView_(event.locationInWindow(), None)
         for index, (rect, _label) in enumerate(self._rows):
             if NSPointInRect(point, rect):
-                if self._on_pick is not None:
-                    self._on_pick(index)
+                self._on_pick(index)
                 return
 
     @objc.python_method
@@ -368,15 +381,14 @@ class FocusMode(NSObject):
         self.moved = []          # [{el, pid, title, x, y}] original AX positions
         self.pools = {"term": [], "edit": []}
         self.index = {"term": -1, "edit": -1}
-        self.last_hole = None
         self.own_pid = os.getpid()
         self.scrim_on = True
-        self.centered = None     # window we have already centred, to avoid fighting drags
-        self.picker = []         # [{rect, entry}] hit targets while the picker is open
+        self.picker = []         # [entry] rows offered while the picker is open
         self.sidecar_dirty = False
-        self.busy_until = [0.0]  # suppresses the leave-focus-mode check during a handover
+        self.busy_until = 0.0    # suppresses the leave-focus-mode check during a handover
         self.last_entry = None       # window framed right now; cleared when you leave
         self.remembered_entry = None # what to re-frame on your next entry; survives leaving
+        self.timer = None        # _start_timer sets it; the delegate is live before then
 
         self._build_panel()
         self._build_menu()
@@ -474,6 +486,7 @@ class FocusMode(NSObject):
         app.setDelegate_(self)
 
     def applicationWillTerminate_(self, _notification):
+        self._stop_timer()
         self.restore_all()
 
 
@@ -499,6 +512,16 @@ class FocusMode(NSObject):
         )
         NSRunLoop.currentRunLoop().addTimer_forMode_(self.timer, kCFRunLoopCommonModes)
 
+    @objc.python_method
+    def _stop_timer(self):
+        """NSTimer retains its target, so the repeating tick and this controller hold
+        each other alive for the life of the run loop. Invalidating on the way out
+        breaks that cycle and, more visibly, stops tick_ firing back into quit()
+        while terminate: is still unwinding."""
+        if self.timer is not None:
+            self.timer.invalidate()
+            self.timer = None
+
     # ------------------------------------------------------------ hole tracking
 
     @objc.python_method
@@ -518,11 +541,10 @@ class FocusMode(NSObject):
         # A signal handler cannot run Python while the Cocoa run loop is idle, so
         # SIGTERM and the quit sentinel are picked up here instead. This is what
         # makes an external stop restore your windows rather than strand them.
-        if _TERMINATE[0] or os.path.exists(QUIT_FLAG):
-            try:
+        quit_flag = os.path.exists(QUIT_FLAG)
+        if _TERMINATE[0] or quit_flag:
+            if quit_flag:
                 os.remove(QUIT_FLAG)
-            except OSError:
-                pass
             self.quit()
             return
         if self.sidecar_dirty:
@@ -535,7 +557,7 @@ class FocusMode(NSObject):
         # to activate the target app for a moment to win the z-order, and treating
         # that as "you left focus mode" would restore the window out from under the
         # hole we just placed.
-        if time.time() < self.busy_until[0]:
+        if time.time() < self.busy_until:
             return
 
         # Focus mode itself is frontmost: show the art and put a window in the hole.
@@ -570,7 +592,6 @@ class FocusMode(NSObject):
         if on:
             self.panel.orderFrontRegardless()
         else:
-            self.centered = None
             self.last_entry = None
             self.view.set_hole(None)
             self.panel.orderOut_(None)
@@ -591,25 +612,23 @@ class FocusMode(NSObject):
         self.focus(entry)
 
     @objc.python_method
-    def center_window(self, window, pid):
-        frame = win_frame(window)
-        if frame is None:
-            return
-        self.remember(window, pid, win_title(window), frame)
+    def center_and_frame(self, element, pid, title, frame):
+        """Remember where the window was, centre it, and move the hole onto the
+        centred frame. The title is a parameter rather than a live win_title read:
+        focus() must record the title its pool was built with, since a Claude Code
+        terminal animates a spinner in its title and the sidecar matches on it.
+        Returns (centred_frame, set_pos_ok)."""
+        self.remember(element, pid, title, frame)
         x, y = self.centered_origin(frame[2], frame[3])
-        set_win_pos(window, x, y)
-        self.set_hole_from_ax((x, y, frame[2], frame[3]))
+        ok = set_win_pos(element, x, y)
+        centred = (x, y, frame[2], frame[3])
+        self.set_hole_from_ax(centred)
+        return centred, ok
 
     @objc.python_method
     def set_hole_from_ax(self, frame):
         x, y, w, h = frame
-        rect = NSMakeRect(
-            x - HOLE_PAD,
-            self.screen_h - y - h - HOLE_PAD,
-            w + 2 * HOLE_PAD,
-            h + 2 * HOLE_PAD,
-        )
-        self.view.set_hole(rect)
+        self.view.set_hole(NSMakeRect(x, self.screen_h - y - h, w, h))
 
     # ---------------------------------------------------------------- actions
 
@@ -649,25 +668,18 @@ class FocusMode(NSObject):
             print(f"[perf] cycle {kind} took {(time.perf_counter()-t0)*1000:.2f} ms", flush=True)
 
     @objc.python_method
-    def focus(self, entry, center=True):
+    def focus(self, entry):
         element, pid = entry["el"], entry["pid"]
         frame = win_frame(element)
         if frame is None:
             return
-        # BOTH steps are needed. AXRaise alone only reorders the window inside its
-        # own app's layer, so cycling from Terminal to an editor made the editor
-        # flash and drop behind Terminal — the active app's windows always sit on
-        # top. The owning app has to be brought forward too.
-        #
-        # Synchronous and sub-millisecond in the common case. This runs on the main
-        # thread from the key tap, so tick_ cannot interleave and no thread or sleep
-        # is needed. Activation only happens when the target is in a DIFFERENT app —
-        # cycling among terminals, which is most of the time, is pure AXRaise.
-        #
-        # There is deliberately no handing activation back: the art stays up for the
-        # app owning the framed window, so leaving the target active is both correct
-        # and what lets you type into it immediately. Removing that round trip is
-        # what removes the flash.
+        # BOTH steps are needed: AXRaise only reorders the window within its own
+        # app's layer, and the active app's windows always sit on top, so the
+        # owning app has to be brought forward too. Activation fires only when the
+        # target is in a DIFFERENT app; cycling among terminals is pure AXRaise.
+        # Both run synchronously on the main thread from the key tap, so tick_
+        # cannot interleave. Activation is deliberately never handed back — the
+        # target stays active so you can type into it straight away.
         self.last_entry = entry
         self.remembered_entry = entry
         front = NSWorkspace.sharedWorkspace().frontmostApplication()
@@ -676,19 +688,13 @@ class FocusMode(NSObject):
             # The OS takes a few ms to actually change frontmost. Hold off the
             # leave-focus-mode check until it lands, or tick_ sees the OLD app still
             # in front, mismatches the new selection and restores the window.
-            self.busy_until[0] = time.time() + 0.5
+            self.busy_until = time.time() + 0.5
         AXUIElementPerformAction(element, "AXRaise")
-        self.centered = element
 
-        if center:
-            self.remember(element, pid, entry["title"], frame)
-            x, y = self.centered_origin(frame[2], frame[3])
-            ok = set_win_pos(element, x, y)
-            frame = (x, y, frame[2], frame[3])
-            if DEBUG:
-                print(f"[focus] {short_title(entry['title'])[:40]!r} set_pos_ok={ok} "
-                      f"want={frame} actual={win_frame(element)}", flush=True)
-        self.set_hole_from_ax(frame)
+        frame, ok = self.center_and_frame(element, pid, entry["title"], frame)
+        if DEBUG:
+            print(f"[focus] {short_title(entry['title'])[:40]!r} set_pos_ok={ok} "
+                  f"want={frame} actual={win_frame(element)}", flush=True)
 
     @objc.python_method
     def centered_origin(self, w, h):
@@ -732,11 +738,8 @@ class FocusMode(NSObject):
         for record in self.moved:
             set_win_pos(record["el"], record["x"], record["y"])
         self.moved = []
-        try:
-            if os.path.exists(SIDECAR):
-                os.remove(SIDECAR)
-        except OSError:
-            pass
+        if os.path.exists(SIDECAR):
+            os.remove(SIDECAR)
 
     # ----------------------------------------------------------------- picker
 
@@ -790,16 +793,14 @@ class FocusMode(NSObject):
         frame = win_frame(window)
         if frame is None:
             return
-        self.remember(window, app.processIdentifier(), win_title(window), frame)
-        x, y = self.centered_origin(frame[2], frame[3])
-        set_win_pos(window, x, y)
-        self.set_hole_from_ax((x, y, frame[2], frame[3]))
+        self.center_and_frame(window, app.processIdentifier(), win_title(window), frame)
 
     def exitFocusMode_(self, _sender):
         self.quit()
 
     @objc.python_method
     def quit(self):
+        self._stop_timer()
         self.restore_all()
         self.panel.orderOut_(None)
         NSApplication.sharedApplication().terminate_(None)
@@ -826,9 +827,8 @@ def _tap_callback(proxy, event_type, event, refcon):
 
     if flags & FLAG_CMD or flags & FLAG_SHIFT:
         return event
-    # One key: the RIGHT Option. macOS reports left and right Option as distinct
-    # device bits, and we consume the event, so left Option keeps doing word-jump
-    # in your shell and editor untouched. ctrl-opt stays as a fallback.
+    # Right Option only (the two Option keys carry distinct device bits), so
+    # consuming the event leaves left Option free for word-jump; ctrl-opt too.
     right_alt = bool(flags & FLAG_ALT and flags & DEV_RIGHT_ALT)
     chord = bool(flags & FLAG_CTRL and flags & FLAG_ALT)
     if not (right_alt or chord):
