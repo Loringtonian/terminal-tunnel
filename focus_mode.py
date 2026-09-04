@@ -15,12 +15,13 @@ key is used because macOS reports the two Option keys as distinct device bits, a
 these events are consumed, so LEFT Option keeps doing word-jump as normal.
     rightopt-Left / Right   cycle terminal windows
     rightopt-Up   / Down    cycle text-editor windows
-    rightopt-Space          window picker; pick a row by number or click
+    rightopt-Space          window picker; then a bare number key or a click
     rightopt-\\              next wallpaper
     rightopt-C              center the current front window
     rightopt-Escape         exit, restoring every window this app moved
 
 Usage:
+    focus_mode.py --setup           choose which apps count as terminals and editors
     focus_mode.py [image ...]       start focus mode; images override the config list
     focus_mode.py --start PATH      start focus mode on PATH, then the config list
     focus_mode.py --list            print the window pools and exit
@@ -661,13 +662,27 @@ class FocusMode(NSObject):
         return merged
 
     @objc.python_method
+    def position_in(self, pool, entry):
+        if entry is None:
+            return None
+        return next((i for i, e in enumerate(pool) if e["el"] == entry["el"]), None)
+
+    @objc.python_method
     def cycle(self, kind, direction):
         t0 = time.perf_counter()
         pool = self.refresh_pool(kind)
         if not pool:
             return
-        self.index[kind] = (self.index[kind] + direction) % len(pool)
-        self.focus(pool[self.index[kind]])
+        here = self.position_in(pool, self.last_entry)
+        if here is None:
+            # You are in the other pool, so this press is a switch, not a step:
+            # go back to the window you were last on here. Only a repeat press
+            # moves. Otherwise alternating terminal/editor would walk both pools
+            # and you would have to hunt for the window you just left.
+            index = self.index[kind] if 0 <= self.index[kind] < len(pool) else 0
+        else:
+            index = (here + direction) % len(pool)
+        self.focus(pool[index])
         if DEBUG:
             print(f"[perf] cycle {kind} took {(time.perf_counter()-t0)*1000:.2f} ms", flush=True)
 
@@ -686,6 +701,13 @@ class FocusMode(NSObject):
         # target stays active so you can type into it straight away.
         self.last_entry = entry
         self.remembered_entry = entry
+        # Remember where this window sits in its pool no matter how it was chosen,
+        # so switching pools and coming back lands on it rather than on whatever
+        # the last arrow press happened to leave behind.
+        for pool_kind, pool in self.pools.items():
+            position = self.position_in(pool, entry)
+            if position is not None:
+                self.index[pool_kind] = position
         front = NSWorkspace.sharedWorkspace().frontmostApplication()
         if front is None or front.processIdentifier() != pid:
             _sysevents_activate(entry["app"])
@@ -836,6 +858,18 @@ def _tap_callback(proxy, event_type, event, refcon):
 
     if flags & FLAG_CMD or flags & FLAG_SHIFT:
         return event
+
+    # An open picker is modal to the keyboard: a bare number picks that row and
+    # bare Escape closes it, with or without Option still held. The panel is
+    # non-activating so your window keeps keyboard focus, which means consuming
+    # these here is the only way they can reach the picker at all.
+    if CONTROLLER.picker:
+        if code in NUMBER_KEYS:
+            CONTROLLER.pick_index(NUMBER_KEYS[code])
+            return None
+        if code == KEY_ESC:
+            CONTROLLER.close_picker()
+            return None
     # Right Option only (the two Option keys carry distinct device bits), so
     # consuming the event leaves left Option free for word-jump; ctrl-opt too.
     right_alt = bool(flags & FLAG_ALT and flags & DEV_RIGHT_ALT)
@@ -845,10 +879,6 @@ def _tap_callback(proxy, event_type, event, refcon):
 
     if code == KEY_SPACE:
         CONTROLLER.toggle_picker()
-    elif code in NUMBER_KEYS and CONTROLLER.picker:
-        CONTROLLER.pick_index(NUMBER_KEYS[code])
-    elif code == KEY_ESC and CONTROLLER.picker:
-        CONTROLLER.close_picker()
     elif code == KEY_LEFT:
         CONTROLLER.cycle("term", -1)
     elif code == KEY_RIGHT:
@@ -884,6 +914,66 @@ def cmd_list():
             x, y, w, h = entry["frame"]
             print(f"  [{i}] {entry['app']:<10} {int(x):>5},{int(y):<5} "
                   f"{int(w)}x{int(h)}  {entry['title'][:60]}")
+
+
+def cmd_setup():
+    """Write config.json by asking which of the running apps are your terminals and
+    your editors. Everyone's editor is different, so the built-in defaults are only
+    a guess; this is how you replace them without hand-editing JSON."""
+    names = sorted({
+        app.localizedName()
+        for app in NSWorkspace.sharedWorkspace().runningApplications()
+        if app.activationPolicy() == NSApplicationActivationPolicyRegular
+        and app.localizedName()
+    })
+    if not names:
+        sys.exit("no running apps to choose from — open your terminal and editor first")
+
+    print("Open the apps you want in the cycle before running this. Running now:\n")
+    for i, name in enumerate(names, 1):
+        print(f"  {i:>2}  {name}")
+    print("\nAnswer with numbers or names, separated by spaces or commas.")
+    print("Press Return to accept the suggestion in brackets.")
+
+    def ask(label, suggested):
+        raw = input(f"\n{label} [{', '.join(suggested)}]: ").strip()
+        if not raw:
+            return list(suggested)
+        chosen = []
+        for token in raw.replace(",", " ").split():
+            if token.isdigit() and 1 <= int(token) <= len(names):
+                chosen.append(names[int(token) - 1])
+            else:
+                chosen.append(token)
+        return chosen
+
+    def suggest(defaults):
+        running = [n for n in names if n in defaults]
+        return running or list(defaults)
+
+    terminals = ask("Terminal apps", suggest(DEFAULT_TERMINALS))
+    editors = ask("Editor apps", suggest(DEFAULT_EDITORS))
+
+    existing = {}
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH) as fh:
+            existing = json.load(fh)
+    config = {
+        "wallpapers": existing.get("wallpapers", []),
+        "terminals": terminals,
+        "editors": editors,
+    }
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CONFIG_PATH, "w") as fh:
+        json.dump(config, fh, indent=2)
+        fh.write("\n")
+    print(f"\nwrote {CONFIG_PATH}")
+    print(f"  terminals: {', '.join(terminals)}")
+    print(f"  editors:   {', '.join(editors)}")
+    if not config["wallpapers"]:
+        print(f"\nNo wallpapers listed yet: add paths to that file, drop images in "
+              f"{DEFAULT_WALLPAPER_DIR}, or pass one on the command line.")
+    print("Check it with: focus_mode.py --list")
 
 
 def cmd_restore():
@@ -926,6 +1016,8 @@ def wallpaper_list(args):
 def main():
     global CONTROLLER
     args = sys.argv[1:]
+    if args[:1] == ["--setup"]:
+        return cmd_setup()
     if args[:1] == ["--list"]:
         return cmd_list()
     if args[:1] == ["--restore"]:
