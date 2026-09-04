@@ -8,22 +8,28 @@ Your real desktop is untouched. Tunnel Vision is a floating panel that sits abov
 
 ## Hotkeys
 
-Hold the **right Option key** (ctrl+option works too). They are global, so they work while you are typing in the focused window. The left Option key is left alone, so word-jump in your shell and editor keeps working.
+> **It has to be the RIGHT Option key.** Left Option deliberately does nothing, so word-jump keeps working in your shell and editor. If nothing happens when you press these, you are holding the wrong one. Ctrl+Option also works, on either side.
 
-| keys            | action                                                  |
-|-----------------|---------------------------------------------------------|
-| ⌥ ← / ⌥ →       | cycle terminal windows                                  |
-| ⌥ ↑ / ⌥ ↓       | cycle editor windows                                    |
-| ⌥ Space         | window picker: click a row, or press its number          |
-| ⌥ \             | next wallpaper                                          |
-| ⌥ C             | centre the front window                                 |
-| ⌥ Esc           | exit, putting every window it moved back where it was   |
+They are global, so they work while you are typing in the focused window.
+
+| keys                   | action                                                  |
+|------------------------|---------------------------------------------------------|
+| right ⌥ ← / right ⌥ →  | cycle terminal windows                                  |
+| right ⌥ ↑ / right ⌥ ↓  | cycle editor windows                                    |
+| right ⌥ Space          | window picker: click a row, or press its number         |
+| right ⌥ \              | give the framed window a different wallpaper            |
+| right ⌥ C              | centre the front window                                 |
+| right ⌥ Esc            | exit, putting every window it moved back where it was   |
+
+The same list is in the app's menu bar while it runs, and is printed when you start it from a terminal.
 
 Launching Tunnel Vision, or Cmd+Tabbing to it, hands keyboard focus straight to the framed window, so you can type without clicking first. Clicking into the framed window keeps the art up. Switching to any other app drops the art and restores the windows; coming back brings it up on the window you were last on.
 
 The two pools remember their place independently. From a terminal, ⌥ ↑ takes you to the editor you last used, and ⌥ ← takes you back to the same terminal rather than the one before it. Only a second press in the same direction steps along a pool, so alternating between a terminal and an editor bounces between exactly those two windows instead of walking you through both lists.
 
 While the picker is open it takes the keyboard: a bare number key picks that row and Esc closes it, no modifier needed.
+
+**Each window keeps its own wallpaper.** The first time you land on a window it takes the next wallpaper in your list and holds it for as long as that window is open, so arrowing back always brings up the same art. The art becomes how you recognise a window before you have read a word of it. Right ⌥ \ re-assigns the framed window, so you choose which art marks which. List more wallpapers than you have windows and no two look alike. Assignments last for the session, not across restarts.
 
 New windows are picked up on your next cycle and join the end of the order. Closed windows drop out, and minimised ones are skipped.
 
@@ -40,6 +46,8 @@ python3 tunnel.py
 ```
 
 `--setup` lists the apps you have open and asks which are your terminals and which are your editors, then writes them to the config file. Run it once before anything else: everyone's editor is different, and the built-in defaults are only a guess at common ones.
+
+It then offers to build `~/Applications/Terminal Tunnel Vision.app` and add it to your Dock. Take it. Run as a bare script the process appears as "Python" with no identity of its own, and only a bundle gives it a real Dock tile and Cmd+Tab entry. Open the app once from Finder afterwards, since a bundle needs its own Accessibility grant, separate from your terminal's.
 
 Grant Accessibility access when macOS asks (System Settings > Privacy & Security > Accessibility). Without it Tunnel Vision cannot see which window is in front or move windows. Run from a terminal, it inherits that terminal app's grant; a `.app` bundle needs its own.
 
@@ -93,7 +101,7 @@ Every window Tunnel Vision moves is written to `~/.config/terminal-tunnel-vision
 - Cycling is `AXRaise` plus, when the target belongs to a different app, a System Events `set frontmost` — the one activation route that works from a process that is not itself active. A cycle measures around 12 ms.
 - Transient collection behaviour keeps the panel on every Space but out of Mission Control and Show Desktop.
 
-Main display only; other monitors are not covered.
+Every display gets its own scrim, and a window is centred on the display it is already on rather than dragged to the main one. A window straddling two screens gets its share of the hole on both. Plugging a monitor in or out rebuilds the scrims, so a new screen is covered without a restart.
 
 ## License
 
