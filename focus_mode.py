@@ -418,7 +418,7 @@ class FocusMode(NSObject):
         multi-megapixel source on every frame."""
         source = NSImage.alloc().initWithContentsOfFile_(path)
         if source is None:
-            return None
+            sys.exit(f"could not decode wallpaper: {path}")
         w, h = self.screen_frame.size.width, self.screen_frame.size.height
         scaled = NSImage.alloc().initWithSize_((w, h))
         src_size = source.size()
@@ -560,11 +560,14 @@ class FocusMode(NSObject):
         if time.time() < self.busy_until:
             return
 
-        # Focus mode itself is frontmost: show the art and put a window in the hole.
+        # Focus mode itself is frontmost (launch, Cmd+Tab, a Dock click): show the
+        # art and hand off to the window that belongs in the hole, so it is ready
+        # to type into without a click. Unconditional, because the app switcher's
+        # own activation can land after our hand-off and put focus mode back in
+        # front; the next tick then simply hands off again.
         if pid == self.own_pid:
-            if not self.scrim_on:
-                self.show_scrim(True)
-                self.reenter()
+            self.show_scrim(True)
+            self.reenter()
             return
 
         # The app owning the window we are framing is frontmost — you clicked into
@@ -592,6 +595,7 @@ class FocusMode(NSObject):
         if on:
             self.panel.orderFrontRegardless()
         else:
+            self.close_picker()
             self.last_entry = None
             self.view.set_hole(None)
             self.panel.orderOut_(None)
@@ -690,6 +694,11 @@ class FocusMode(NSObject):
             # in front, mismatches the new selection and restores the window.
             self.busy_until = time.time() + 0.5
         AXUIElementPerformAction(element, "AXRaise")
+        # AXRaise orders the window front; these make it the app's main and
+        # keyboard-focused window too, so typing lands in the framed window and
+        # not in whichever of the app's windows was key before.
+        AXUIElementSetAttributeValue(element, "AXMain", True)
+        AXUIElementSetAttributeValue(element, "AXFocused", True)
 
         frame, ok = self.center_and_frame(element, pid, entry["title"], frame)
         if DEBUG:

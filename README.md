@@ -17,7 +17,7 @@ Hold the **right Option key** (ctrl+option works too). They are global, so they 
 | ⌥ C             | centre the front window                                 |
 | ⌥ Esc           | exit, putting every window it moved back where it was   |
 
-Cycling centres the chosen window and cuts the hole around it. Clicking into the framed window keeps the art up. Switching to any other app (a browser, Finder) drops the art and restores the windows; coming back brings it up again on the window you were last on. New windows are picked up on your next cycle and appear at the end of the order.
+Cycling centres the chosen window and cuts the hole around it. Launching Focus Mode, or Cmd+Tabbing to it, hands keyboard focus straight to the framed window, so you can type without clicking. Clicking into the framed window keeps the art up. Switching to any other app (a browser, Finder) drops the art and restores the windows; coming back brings it up again on the window you were last on. New windows are picked up on your next cycle and appear at the end of the order.
 
 ## Install
 
