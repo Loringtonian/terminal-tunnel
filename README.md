@@ -27,6 +27,8 @@ While the picker is open it takes the keyboard: a bare number key picks that row
 
 New windows are picked up on your next cycle and join the end of the order. Closed windows drop out, and minimised ones are skipped.
 
+The Dock and Cmd+Tab tile follow the wallpaper you are on, drawn as a terminal window sitting on that art, so the switcher shows the tunnel you are about to return to rather than a fixed logo.
+
 ## Install
 
 macOS only: it is built on AppKit, the Accessibility API and a CGEvent tap.

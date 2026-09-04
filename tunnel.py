@@ -39,7 +39,8 @@ import time
 
 import objc
 from AppKit import (
-    NSAlert, NSApplication, NSApplicationActivationPolicyRegular, NSBezierPath,
+    NSAlert, NSApplication, NSApplicationActivationPolicyRegular,
+    NSBitmapImageRep, NSPNGFileType, NSBezierPath,
     NSColor, NSCompositingOperationSourceOver, NSEvenOddWindingRule,
     NSFont, NSGraphicsContext, NSImage,
     NSMenu, NSMenuItem, NSPanel, NSScreen, NSTimer, NSView,
@@ -119,6 +120,13 @@ DEBUG = bool(os.environ.get("TUNNEL_VISION_DEBUG"))
 # whatever is behind the window (i.e. the real desktop) around its edge.
 HOLE_RADIUS = 10.0
 MIN_WIN_W, MIN_WIN_H = 200, 120
+
+# The Dock and Cmd+Tab tile: a square crop of the wallpaper you are on with a
+# terminal window drawn on it, so the switcher shows the tunnel you are actually
+# in rather than a fixed logo. Sized to stay legible at the ~128px tile.
+ICON_SIDE = 512.0
+ICON_WIN_W, ICON_WIN_H = 0.50, 0.36
+ICON_WIN_RADIUS = 12.0
 
 
 # ---------------------------------------------------------------- accessibility
@@ -259,6 +267,64 @@ def pool_for(names):
             })
     entries.sort(key=lambda e: (e["app"], round(e["frame"][0]), round(e["frame"][1])))
     return entries
+
+
+def render_icon(image):
+    """A square centre-crop of the wallpaper with a small terminal window drawn on
+    it. Cocoa scales this down for the Dock and the Cmd+Tab tile, so the window is
+    kept large and plain enough to survive 128px."""
+    side = ICON_SIDE
+    source = image.size()
+    scale = max(side / source.width, side / source.height)
+    draw_w, draw_h = source.width * scale, source.height * scale
+    icon = NSImage.alloc().initWithSize_((side, side))
+    icon.lockFocus()
+    image.drawInRect_fromRect_operation_fraction_(
+        NSMakeRect((side - draw_w) / 2, (side - draw_h) / 2, draw_w, draw_h),
+        ((0, 0), (0, 0)), NSCompositingOperationSourceOver, 1.0,
+    )
+
+    w, h = side * ICON_WIN_W, side * ICON_WIN_H
+    x, y = (side - w) / 2, (side - h) / 2
+    window = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+        NSMakeRect(x, y, w, h), ICON_WIN_RADIUS, ICON_WIN_RADIUS)
+    NSColor.colorWithCalibratedWhite_alpha_(0.07, 1.0).setFill()
+    window.fill()
+    NSColor.colorWithCalibratedWhite_alpha_(0.55, 1.0).setStroke()
+    window.setLineWidth_(3.0)
+    window.stroke()
+
+    # Three lines of "output" and a prompt block: enough to read as a terminal
+    # at tile size, where anything finer turns to mush.
+    pad, line_h = w * 0.10, h * 0.085
+    gap = line_h * 1.9
+    top = y + h - pad - line_h
+    NSColor.colorWithCalibratedWhite_alpha_(0.55, 1.0).setFill()
+    for i, fraction in enumerate((0.62, 0.45, 0.72)):
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(x + pad, top - i * gap, (w - 2 * pad) * fraction, line_h),
+            line_h / 2, line_h / 2).fill()
+    NSColor.colorWithCalibratedWhite_alpha_(0.95, 1.0).setFill()
+    NSBezierPath.bezierPathWithRect_(
+        NSMakeRect(x + pad, top - 3 * gap, line_h * 0.9, line_h)).fill()
+    icon.unlockFocus()
+    return icon
+
+
+def write_icon_png(image_path, out_path):
+    """Render an image's icon to a PNG. make_app.py calls this so a bundle's icon
+    matches what the running app puts in the Dock."""
+    NSApplication.sharedApplication()          # lockFocus needs an app instance
+    source = NSImage.alloc().initWithContentsOfFile_(image_path)
+    if source is None:
+        sys.exit(f"could not decode image: {image_path}")
+    icon = render_icon(source)
+    icon.lockFocus()
+    bitmap = NSBitmapImageRep.alloc().initWithFocusedViewRect_(
+        NSMakeRect(0, 0, ICON_SIDE, ICON_SIDE))
+    icon.unlockFocus()
+    data = bitmap.representationUsingType_properties_(NSPNGFileType, None)
+    data.writeToFile_atomically_(out_path, True)
 
 
 # ------------------------------------------------------------------- scrim view
@@ -434,6 +500,15 @@ class TunnelVision(NSObject):
         return scaled
 
     @objc.python_method
+    def show_wallpaper(self, index):
+        """Wallpaper and app icon move together, so the Cmd+Tab tile always shows
+        the art you are looking at."""
+        self.wp_index = index
+        image = self.images[index]
+        self.view.set_image(image)
+        NSApplication.sharedApplication().setApplicationIconImage_(render_icon(image))
+
+    @objc.python_method
     def _build_panel(self):
         style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
         panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -461,7 +536,6 @@ class TunnelVision(NSObject):
         view = ScrimView.alloc().initWithFrame_(
             NSMakeRect(0, 0, self.screen_frame.size.width, self.screen_frame.size.height)
         )
-        view.set_image(self.images[self.wp_index])
         panel.setContentView_(view)
         panel.orderFrontRegardless()
         if DEBUG:
@@ -470,6 +544,7 @@ class TunnelVision(NSObject):
                   f"frame={panel.frame()} view={view.frame()}", flush=True)
         self.panel = panel
         self.view = view
+        self.show_wallpaper(self.wp_index)
 
     @objc.python_method
     def _build_menu(self):
@@ -812,8 +887,7 @@ class TunnelVision(NSObject):
 
     @objc.python_method
     def next_wallpaper(self):
-        self.wp_index = (self.wp_index + 1) % len(self.images)
-        self.view.set_image(self.images[self.wp_index])
+        self.show_wallpaper((self.wp_index + 1) % len(self.images))
 
     @objc.python_method
     def center_front(self):

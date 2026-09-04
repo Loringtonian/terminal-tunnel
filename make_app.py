@@ -18,6 +18,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from tunnel import write_icon_png  # noqa: E402  (needs HERE on sys.path first)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 TUNNEL_VISION = os.path.join(HERE, "tunnel.py")
 ICON_SIZES = (16, 32, 128, 256, 512)
@@ -30,25 +33,17 @@ exec {python} {script}{args} >> "$LOG" 2>&1
 """
 
 
-def _sips(*args, text=False):
-    """Every sips call is checked and kept quiet; image_size also wants its stdout."""
-    return subprocess.run(["sips", *args], check=True, capture_output=True, text=text)
-
-
-def image_size(path):
-    out = _sips("-g", "pixelWidth", "-g", "pixelHeight", path, text=True).stdout
-    dims = dict(line.strip().split(": ") for line in out.splitlines()[1:])
-    return int(dims["pixelWidth"]), int(dims["pixelHeight"])
+def _sips(*args):
+    """Every sips call is checked and kept quiet."""
+    return subprocess.run(["sips", *args], check=True, capture_output=True)
 
 
 def build_icon(image, icns_path):
-    """Centre-crop the image to a square and write an .icns with sips + iconutil,
-    both of which ship with macOS."""
+    """Write an .icns showing the same thing the running app puts in the Dock: the
+    wallpaper with a terminal window on it. sips and iconutil ship with macOS."""
     with tempfile.TemporaryDirectory() as tmp:
-        side = min(image_size(image))
         square = os.path.join(tmp, "square.png")
-        _sips("-s", "format", "png", "--cropToHeightWidth", str(side), str(side),
-              image, "--out", square)
+        write_icon_png(image, square)
         iconset = os.path.join(tmp, "AppIcon.iconset")
         os.mkdir(iconset)
         for size in ICON_SIZES:
