@@ -4,9 +4,7 @@ A full-screen piece of art with a hole cut around the one window you are working
 
 Your real desktop is untouched. Tunnel Vision is a floating panel that sits above every other window, ignores the mouse entirely, and follows whatever window is frontmost. Summon it, work inside the hole, and everything else on the screen is art. Cycle between your terminal windows and your editor windows with one hand; each one you land on is centred for you, and put back where it was when you leave.
 
-![one of the three wallpapers included](wallpapers/orbital.jpg)
-
-*One of the three wallpapers that ship with it.*
+![a terminal window sitting in the hole, the rest of the screen given over to the wallpaper](assets/screenshot.jpg)
 
 ## Hotkeys
 
