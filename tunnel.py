@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Focus Mode — a full-screen art scrim with a hole cut around the one window
+Terminal Tunnel Vision — a full-screen art scrim with a hole cut around the one window
 you are working in. Your real desktop background is untouched; this is a mode
 you summon and dismiss.
 
@@ -21,15 +21,15 @@ these events are consumed, so LEFT Option keeps doing word-jump as normal.
     rightopt-Escape         exit, restoring every window this app moved
 
 Usage:
-    focus_mode.py --setup           choose which apps count as terminals and editors
-    focus_mode.py [image ...]       start focus mode; images override the config list
-    focus_mode.py --start PATH      start focus mode on PATH, then the config list
-    focus_mode.py --list            print the window pools and exit
-    focus_mode.py --quit            ask the running instance to restore and exit
-    focus_mode.py --restore         re-apply the crash sidecar and exit
+    tunnel.py --setup           choose which apps count as terminals and editors
+    tunnel.py [image ...]       start tunnel vision; images override the config list
+    tunnel.py --start PATH      start tunnel vision on PATH, then the config list
+    tunnel.py --list            print the window pools and exit
+    tunnel.py --quit            ask the running instance to restore and exit
+    tunnel.py --restore         re-apply the crash sidecar and exit
 
 Configuration (wallpapers, which apps count as terminals and editors) lives in
-~/.config/focus-mode/config.json — see README.md.
+~/.config/terminal-tunnel-vision/config.json — see README.md.
 """
 import json
 import os
@@ -67,7 +67,7 @@ from Quartz import (
     kCGSessionEventTap, kCFRunLoopCommonModes,
 )
 
-CONFIG_DIR = os.path.expanduser(os.environ.get("FOCUS_MODE_HOME", "~/.config/focus-mode"))
+CONFIG_DIR = os.path.expanduser(os.environ.get("TUNNEL_VISION_HOME", "~/.config/terminal-tunnel-vision"))
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 SIDECAR = os.path.join(CONFIG_DIR, "restore.json")
 QUIT_FLAG = os.path.join(CONFIG_DIR, "quit")
@@ -113,7 +113,7 @@ FLAG_CTRL, FLAG_ALT, FLAG_CMD, FLAG_SHIFT = 0x40000, 0x80000, 0x100000, 0x20000
 # Device-dependent bits that tell the two Option keys apart (left = 0x20).
 DEV_RIGHT_ALT = 0x40
 
-DEBUG = bool(os.environ.get("FOCUS_MODE_DEBUG"))
+DEBUG = bool(os.environ.get("TUNNEL_VISION_DEBUG"))
 
 # The hole hugs the window exactly — no pad. Any pad at all exposes a ring of
 # whatever is behind the window (i.e. the real desktop) around its edge.
@@ -200,7 +200,7 @@ def _script_error(error):
 
 def _sysevents_activate(app_name):
     """Only System Events can bring an app forward for us: macOS ignores activation
-    requests from a process that is not itself active, and focus mode is backgrounded
+    requests from a process that is not itself active, and tunnel vision is backgrounded
     whenever another app has focus. Measured — activateWithOptions_ and a direct
     AXFrontmost write both report success and do nothing.
 
@@ -365,9 +365,9 @@ class ScrimView(NSView):
 
 # -------------------------------------------------------------------- controller
 
-class FocusMode(NSObject):
+class TunnelVision(NSObject):
     def initWithWallpapers_(self, paths):
-        self = objc.super(FocusMode, self).init()
+        self = objc.super(TunnelVision, self).init()
         if self is None:
             return None
 
@@ -386,7 +386,7 @@ class FocusMode(NSObject):
         self.scrim_on = True
         self.picker = []         # [entry] rows offered while the picker is open
         self.sidecar_dirty = False
-        self.busy_until = 0.0    # suppresses the leave-focus-mode check during a handover
+        self.busy_until = 0.0    # suppresses the leave-tunnel-vision check during a handover
         self.last_entry = None       # window framed right now; cleared when you leave
         self.remembered_entry = None # what to re-frame on your next entry; survives leaving
         self.timer = None        # _start_timer sets it; the delegate is live before then
@@ -399,7 +399,7 @@ class FocusMode(NSObject):
 
         # Test/safety valve: a hard deadline after which the scrim tears itself
         # down and restores anything it moved, even if nothing else works.
-        limit = float(os.environ.get("FOCUS_MODE_SECONDS", "0") or 0)
+        limit = float(os.environ.get("TUNNEL_VISION_SECONDS", "0") or 0)
         if limit > 0:
             NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                 limit, self, "deadline:", None, False
@@ -479,7 +479,7 @@ class FocusMode(NSObject):
         bar.addItem_(holder)
         menu = NSMenu.alloc().init()
         menu.addItem_(NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Quit Focus Mode", "exitFocusMode:", "q"))
+            "Quit Terminal Tunnel Vision", "exitTunnelVision:", "q"))
         menu.itemAtIndex_(0).setTarget_(self)
         holder.setSubmenu_(menu)
         app.setMainMenu_(bar)
@@ -556,15 +556,15 @@ class FocusMode(NSObject):
 
         # Ignore the frontmost app entirely while we are mid-handover: cycling has
         # to activate the target app for a moment to win the z-order, and treating
-        # that as "you left focus mode" would restore the window out from under the
+        # that as "you left" would restore the window out from under the
         # hole we just placed.
         if time.time() < self.busy_until:
             return
 
-        # Focus mode itself is frontmost (launch, Cmd+Tab, a Dock click): show the
+        # Tunnel vision itself is frontmost (launch, Cmd+Tab, a Dock click): show the
         # art and hand off to the window that belongs in the hole, so it is ready
         # to type into without a click. Unconditional, because the app switcher's
-        # own activation can land after our hand-off and put focus mode back in
+        # own activation can land after our hand-off and put tunnel vision back in
         # front; the next tick then simply hands off again.
         if pid == self.own_pid:
             self.show_scrim(True)
@@ -573,7 +573,7 @@ class FocusMode(NSObject):
 
         # The app owning the window we are framing is frontmost — you clicked into
         # the framed window to work in it. The art MUST stay: hiding here is what
-        # made every click knock focus mode into the background. No reenter() on
+        # made every click knock tunnel vision into the background. No reenter() on
         # this path either, since that would steal focus straight back off you.
         if self.last_entry is not None and pid == self.last_entry["pid"]:
             self.show_scrim(True)
@@ -603,7 +603,7 @@ class FocusMode(NSObject):
 
     @objc.python_method
     def reenter(self):
-        """Put a window back in the hole on entering focus mode: the one you were
+        """Put a window back in the hole on entering tunnel vision: the one you were
         last on, or the first terminal the very first time."""
         entry = self.remembered_entry
         if entry is not None and win_frame(entry["el"]) is None:
@@ -712,7 +712,7 @@ class FocusMode(NSObject):
         if front is None or front.processIdentifier() != pid:
             _sysevents_activate(entry["app"])
             # The OS takes a few ms to actually change frontmost. Hold off the
-            # leave-focus-mode check until it lands, or tick_ sees the OLD app still
+            # leave-tunnel-vision check until it lands, or tick_ sees the OLD app still
             # in front, mismatches the new selection and restores the window.
             self.busy_until = time.time() + 0.5
         AXUIElementPerformAction(element, "AXRaise")
@@ -826,7 +826,7 @@ class FocusMode(NSObject):
             return
         self.center_and_frame(window, app.processIdentifier(), win_title(window), frame)
 
-    def exitFocusMode_(self, _sender):
+    def exitTunnelVision_(self, _sender):
         self.quit()
 
     @objc.python_method
@@ -973,7 +973,7 @@ def cmd_setup():
     if not config["wallpapers"]:
         print(f"\nNo wallpapers listed yet: add paths to that file, drop images in "
               f"{DEFAULT_WALLPAPER_DIR}, or pass one on the command line.")
-    print("Check it with: focus_mode.py --list")
+    print("Check it with: tunnel.py --list")
 
 
 def cmd_restore():
@@ -999,7 +999,7 @@ def wallpaper_list(args):
     config list but rotates it so PATH is shown first."""
     if args[:1] == ["--start"]:
         if len(args) != 2:
-            sys.exit("usage: focus_mode.py --start PATH")
+            sys.exit("usage: tunnel.py --start PATH")
         start = os.path.abspath(args[1])
         rest = [p for p in CONFIG["wallpapers"] if os.path.abspath(p) != start]
         paths = [start] + rest
@@ -1039,15 +1039,15 @@ def main():
     # it needs its own Accessibility grant, which Terminal-launched runs inherit.
     if not AXIsProcessTrustedWithOptions({"AXTrustedCheckOptionPrompt": True}):
         _alert(
-            "Focus Mode needs Accessibility access",
+            "Terminal Tunnel Vision needs Accessibility access",
             "Open System Settings > Privacy & Security > Accessibility and switch "
-            "on Focus Mode (or the wallpaper app you double-clicked), then launch "
+            "on Terminal Tunnel Vision (or the wallpaper app you double-clicked), then launch "
             "it again.\n\nWithout it the scrim cannot see which window is in front "
             "or move windows to the centre.",
         )
         return
 
-    CONTROLLER = FocusMode.alloc().initWithWallpapers_(wallpapers)
+    CONTROLLER = TunnelVision.alloc().initWithWallpapers_(wallpapers)
     app.run()
 
 
