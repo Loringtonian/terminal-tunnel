@@ -16,7 +16,7 @@ these events are consumed, so LEFT Option keeps doing word-jump as normal.
     rightopt-Left / Right   cycle terminal windows
     rightopt-Up   / Down    cycle text-editor windows
     rightopt-Space          window picker; then a bare number key or a click
-    rightopt-\\              next wallpaper
+    rightopt-\\              give this window a different wallpaper
     rightopt-C              center the current front window
     rightopt-Escape         exit, restoring every window this app moved
 
@@ -34,6 +34,7 @@ Configuration (wallpapers, which apps count as terminals and editors) lives in
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 
@@ -57,8 +58,9 @@ from ApplicationServices import (
     AXUIElementSetAttributeValue, AXValueCreate, AXValueGetValue,
     kAXValueCGPointType, kAXValueCGSizeType,
 )
-from Foundation import (NSAppleScript, NSMakePoint, NSMakeRect, NSObject,
-                        NSPointInRect, NSRunLoop, NSString)
+from Foundation import (NSAppleScript, NSMakePoint, NSMakeRect,
+                        NSNotificationCenter, NSObject, NSPointInRect, NSRunLoop,
+                        NSString)
 from Quartz import (
     CFMachPortCreateRunLoopSource, CFRunLoopAddSource, CFRunLoopGetCurrent,
     CGEventGetFlags, CGEventGetIntegerValueField, CGEventMaskBit,
@@ -115,6 +117,24 @@ FLAG_CTRL, FLAG_ALT, FLAG_CMD, FLAG_SHIFT = 0x40000, 0x80000, 0x100000, 0x20000
 DEV_RIGHT_ALT = 0x40
 
 DEBUG = bool(os.environ.get("TUNNEL_VISION_DEBUG"))
+
+# Stated once and reused by the menu bar, --setup and the startup banner. The
+# RIGHT Option key is the part people miss: left Option is deliberately left
+# alone so word-jump keeps working, so nothing happens if you use it.
+HOTKEY_HELP = (
+    "Hold the RIGHT Option key — left Option does nothing",
+    "right ⌥ ←  /  →      cycle terminal windows",
+    "right ⌥ ↑  /  ↓      cycle editor windows",
+    "right ⌥ space        window picker (then a number key)",
+    "right ⌥ \\            give this window a different wallpaper",
+    "right ⌥ C            centre the front window",
+    "right ⌥ esc          quit, restoring your windows",
+)
+
+
+def print_hotkeys():
+    for line in HOTKEY_HELP:
+        print(f"  {line}")
 
 # The hole hugs the window exactly — no pad. Any pad at all exposes a ring of
 # whatever is behind the window (i.e. the real desktop) around its edge.
@@ -437,12 +457,13 @@ class TunnelVision(NSObject):
         if self is None:
             return None
 
-        self.screen = NSScreen.mainScreen()
-        self.screen_frame = self.screen.frame()
-        self.visible = self.screen.visibleFrame()
-        self.screen_h = self.screen_frame.size.height
-
-        self.images = [self._load(path) for path in paths]
+        # Every display gets its own scrim. Accessibility reports window positions
+        # in one global space whose origin is the top-left of the PRIMARY screen,
+        # so that screen's height is the reference for every coordinate flip.
+        self.paths = paths
+        self.screens = list(NSScreen.screens())
+        self.primary_h = self.screens[0].frame().size.height
+        self.images = self._load_all()   # [screen index][wallpaper index]
         self.wp_index = 0
 
         self.moved = []          # [{el, pid, title, x, y}] original AX positions
@@ -455,10 +476,17 @@ class TunnelVision(NSObject):
         self.busy_until = 0.0    # suppresses the leave-tunnel-vision check during a handover
         self.last_entry = None       # window framed right now; cleared when you leave
         self.remembered_entry = None # what to re-frame on your next entry; survives leaving
+        self.window_wp = {}          # AX element -> wallpaper index, its visual cue
+        self.next_wp = 0             # hands out wallpapers to windows in rotation
         self.timer = None        # _start_timer sets it; the delegate is live before then
 
-        self._build_panel()
+        self.panels, self.views = [], []
+        self.picker_view = None
+        self._build_panels()
         self._build_menu()
+        NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self, "screensChanged:", "NSApplicationDidChangeScreenParametersNotification",
+            None)
         warm_sysevents()
         self._install_tap()
         self._start_timer()
@@ -480,17 +508,14 @@ class TunnelVision(NSObject):
     # ---------------------------------------------------------------- setup
 
     @objc.python_method
-    def _load(self, path):
-        """Decode once, downsampled to the screen, so drawRect_ never rescales a
-        multi-megapixel source on every frame."""
-        source = NSImage.alloc().initWithContentsOfFile_(path)
-        if source is None:
-            sys.exit(f"could not decode wallpaper: {path}")
-        w, h = self.screen_frame.size.width, self.screen_frame.size.height
+    def _scaled(self, source, screen):
+        """Fill a screen with the image, cropping the overflow. Done once per screen
+        so drawRect_ never rescales a multi-megapixel source on every frame."""
+        w, h = screen.frame().size.width, screen.frame().size.height
         scaled = NSImage.alloc().initWithSize_((w, h))
-        src_size = source.size()
-        scale = max(w / src_size.width, h / src_size.height)
-        draw_w, draw_h = src_size.width * scale, src_size.height * scale
+        src = source.size()
+        scale = max(w / src.width, h / src.height)
+        draw_w, draw_h = src.width * scale, src.height * scale
         scaled.lockFocus()
         source.drawInRect_fromRect_operation_fraction_(
             NSMakeRect((w - draw_w) / 2, (h - draw_h) / 2, draw_w, draw_h),
@@ -500,50 +525,91 @@ class TunnelVision(NSObject):
         return scaled
 
     @objc.python_method
+    def _load_all(self):
+        """One decode per wallpaper, scaled for each screen. Screens differ in size
+        and aspect, so a single scaled copy would stretch on the others. Sources are
+        released as we go rather than all being held at once."""
+        images = [[] for _ in self.screens]
+        for path in self.paths:
+            source = NSImage.alloc().initWithContentsOfFile_(path)
+            if source is None:
+                sys.exit(f"could not decode wallpaper: {path}")
+            for i, screen in enumerate(self.screens):
+                images[i].append(self._scaled(source, screen))
+        return images
+
+    @objc.python_method
+    def wallpaper_for(self, element):
+        """Each window keeps one wallpaper for as long as it is open, so arrowing back
+        to it shows the same art every time — the art is how you recognise the window
+        before you can read it. New windows take the next one in rotation."""
+        if element not in self.window_wp:
+            self.window_wp[element] = self.next_wp
+            self.next_wp = (self.next_wp + 1) % len(self.images[0])
+        return self.window_wp[element]
+
+    @objc.python_method
     def show_wallpaper(self, index):
         """Wallpaper and app icon move together, so the Cmd+Tab tile always shows
         the art you are looking at."""
         self.wp_index = index
-        image = self.images[index]
-        self.view.set_image(image)
-        NSApplication.sharedApplication().setApplicationIconImage_(render_icon(image))
+        for view, per_screen in zip(self.views, self.images):
+            view.set_image(per_screen[index])
+        NSApplication.sharedApplication().setApplicationIconImage_(
+            render_icon(self.images[0][index]))
+
+    def screensChanged_(self, _notification):
+        """A display plugged in, unplugged, or rearranged. Rebuild every scrim so a
+        new screen is covered and a removed one does not leave a stale panel."""
+        self.close_picker()
+        for panel in self.panels:
+            panel.orderOut_(None)
+        self.screens = list(NSScreen.screens())
+        self.primary_h = self.screens[0].frame().size.height
+        self.images = self._load_all()
+        self.panels, self.views = [], []
+        self._build_panels()
+        if not self.scrim_on:
+            for panel in self.panels:
+                panel.orderOut_(None)
 
     @objc.python_method
-    def _build_panel(self):
+    def _build_panels(self):
         style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
-        panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-            self.screen_frame, style, NSBackingStoreBuffered, False
-        )
-        panel.setLevel_(NSFloatingWindowLevel)
-        panel.setOpaque_(False)
-        panel.setBackgroundColor_(NSColor.clearColor())
-        panel.setHasShadow_(False)
-        panel.setIgnoresMouseEvents_(True)
-        panel.setBecomesKeyOnlyIfNeeded_(True)
-        # Visibility is managed in tick_, not by hidesOnDeactivate: the art must
-        # survive clicking INTO the window it is framing, and disappear only when
-        # you switch to an app outside the cycle.
-        panel.setHidesOnDeactivate_(False)
-        # Transient, NOT Stationary: Stationary means "unaffected by Expose", which
-        # left the scrim covering the desktop during a Show Desktop hot corner.
-        # Transient floats across Spaces but gets out of the way for Expose.
-        panel.setCollectionBehavior_(
-            NSWindowCollectionBehaviorCanJoinAllSpaces
-            | NSWindowCollectionBehaviorTransient
-            | NSWindowCollectionBehaviorIgnoresCycle
-            | NSWindowCollectionBehaviorFullScreenNone
-        )
-        view = ScrimView.alloc().initWithFrame_(
-            NSMakeRect(0, 0, self.screen_frame.size.width, self.screen_frame.size.height)
-        )
-        panel.setContentView_(view)
-        panel.orderFrontRegardless()
-        if DEBUG:
-            print(f"[panel] images={self.images}", flush=True)
-            print(f"[panel] visible={panel.isVisible()} level={panel.level()} "
-                  f"frame={panel.frame()} view={view.frame()}", flush=True)
-        self.panel = panel
-        self.view = view
+        for screen in self.screens:
+            frame = screen.frame()
+            panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+                frame, style, NSBackingStoreBuffered, False
+            )
+            panel.setLevel_(NSFloatingWindowLevel)
+            panel.setOpaque_(False)
+            panel.setBackgroundColor_(NSColor.clearColor())
+            panel.setHasShadow_(False)
+            panel.setIgnoresMouseEvents_(True)
+            panel.setBecomesKeyOnlyIfNeeded_(True)
+            # Visibility is managed in tick_, not by hidesOnDeactivate: the art must
+            # survive clicking INTO the window it is framing, and disappear only when
+            # you switch to an app outside the cycle.
+            panel.setHidesOnDeactivate_(False)
+            # Transient, NOT Stationary: Stationary means "unaffected by Expose", which
+            # left the scrim covering the desktop during a Show Desktop hot corner.
+            # Transient floats across Spaces but gets out of the way for Expose.
+            panel.setCollectionBehavior_(
+                NSWindowCollectionBehaviorCanJoinAllSpaces
+                | NSWindowCollectionBehaviorTransient
+                | NSWindowCollectionBehaviorIgnoresCycle
+                | NSWindowCollectionBehaviorFullScreenNone
+            )
+            view = ScrimView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, frame.size.width, frame.size.height))
+            panel.setContentView_(view)
+            panel.setFrameOrigin_(frame.origin)
+            panel.orderFrontRegardless()
+            self.panels.append(panel)
+            self.views.append(view)
+            if DEBUG:
+                print(f"[panel] screen={frame} visible={panel.isVisible()} "
+                      f"level={panel.level()}", flush=True)
         self.show_wallpaper(self.wp_index)
 
     @objc.python_method
@@ -553,9 +619,17 @@ class TunnelVision(NSObject):
         holder = NSMenuItem.alloc().init()
         bar.addItem_(holder)
         menu = NSMenu.alloc().init()
-        menu.addItem_(NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Quit Terminal Tunnel Vision", "exitTunnelVision:", "q"))
-        menu.itemAtIndex_(0).setTarget_(self)
+        # The hotkeys as disabled rows: the menu bar is where a new user looks, and
+        # the right-Option requirement is invisible otherwise.
+        for line in HOTKEY_HELP:
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(line, None, "")
+            item.setEnabled_(False)
+            menu.addItem_(item)
+        menu.addItem_(NSMenuItem.separatorItem())
+        quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Quit Terminal Tunnel Vision", "exitTunnelVision:", "q")
+        quit_item.setTarget_(self)
+        menu.addItem_(quit_item)
         holder.setSubmenu_(menu)
         app.setMainMenu_(bar)
         # Restore on ANY route out — Cmd-Q, the Dock, terminate: from anywhere.
@@ -669,12 +743,14 @@ class TunnelVision(NSObject):
             return
         self.scrim_on = on
         if on:
-            self.panel.orderFrontRegardless()
+            for panel in self.panels:
+                panel.orderFrontRegardless()
         else:
             self.close_picker()
             self.last_entry = None
-            self.view.set_hole(None)
-            self.panel.orderOut_(None)
+            for view, panel in zip(self.views, self.panels):
+                view.set_hole(None)
+                panel.orderOut_(None)
 
     @objc.python_method
     def reenter(self):
@@ -699,16 +775,33 @@ class TunnelVision(NSObject):
         terminal animates a spinner in its title and the sidecar matches on it.
         Returns (centred_frame, set_pos_ok)."""
         self.remember(element, pid, title, frame)
-        x, y = self.centered_origin(frame[2], frame[3])
+        x, y = self.centered_origin(frame[2], frame[3], self.screen_for_ax(frame))
         ok = set_win_pos(element, x, y)
         centred = (x, y, frame[2], frame[3])
         self.set_hole_from_ax(centred)
         return centred, ok
 
     @objc.python_method
-    def set_hole_from_ax(self, frame):
+    def screen_for_ax(self, frame):
+        """The screen a window sits on, chosen by its centre so a window straddling
+        an edge belongs to the display showing most of it."""
         x, y, w, h = frame
-        self.view.set_hole(NSMakeRect(x, self.screen_h - y - h, w, h))
+        centre = NSMakePoint(x + w / 2, self.primary_h - (y + h / 2))
+        for screen in self.screens:
+            if NSPointInRect(centre, screen.frame()):
+                return screen
+        return self.screens[0]
+
+    @objc.python_method
+    def set_hole_from_ax(self, frame):
+        """One global hole, expressed in each scrim's own coordinates. A hole that
+        falls outside a given screen simply does not appear on it, and a window
+        straddling two displays gets its share of the hole on both."""
+        x, y, w, h = frame
+        gx, gy = x, self.primary_h - y - h
+        for view, panel in zip(self.views, self.panels):
+            origin = panel.frame().origin
+            view.set_hole(NSMakeRect(gx - origin.x, gy - origin.y, w, h))
 
     # ---------------------------------------------------------------- actions
 
@@ -776,6 +869,7 @@ class TunnelVision(NSObject):
         # target stays active so you can type into it straight away.
         self.last_entry = entry
         self.remembered_entry = entry
+        self.show_wallpaper(self.wallpaper_for(element))
         # Remember where this window sits in its pool no matter how it was chosen,
         # so switching pools and coming back lands on it rather than on whatever
         # the last arrow press happened to leave behind.
@@ -803,12 +897,14 @@ class TunnelVision(NSObject):
                   f"want={frame} actual={win_frame(element)}", flush=True)
 
     @objc.python_method
-    def centered_origin(self, w, h):
-        vx = self.visible.origin.x
-        vw = self.visible.size.width
-        vh = self.visible.size.height
-        ax_top = self.screen_h - (self.visible.origin.y + vh)
-        x = vx + max(0, (vw - w) / 2)
+    def centered_origin(self, w, h, screen):
+        """Centre within one screen's visible frame, in Accessibility coordinates.
+        Centring on the screen the window is already on keeps a multi-display layout
+        intact instead of dragging every window onto the primary."""
+        visible = screen.visibleFrame()
+        vh = visible.size.height
+        ax_top = self.primary_h - (visible.origin.y + vh)
+        x = visible.origin.x + max(0, (visible.size.width - w) / 2)
         y = ax_top + max(0, (vh - h) / 2)
         return int(x), int(y)
 
@@ -857,11 +953,17 @@ class TunnelVision(NSObject):
         entries = self.refresh_pool("term") + self.refresh_pool("edit")
         if not entries:
             return
+        # The picker belongs on the display you are working on, not always the
+        # primary one.
+        frame = win_frame(self.last_entry["el"]) if self.last_entry else None
+        screen = self.screen_for_ax(frame) if frame else self.screens[0]
+        index = self.screens.index(screen) if screen in self.screens else 0
+        size = screen.frame().size
         row_h, gap, pad = 32.0, 2.0, 18.0
         width = 660.0
         total = len(entries) * (row_h + gap) - gap
-        top = (self.screen_frame.size.height + total) / 2
-        left = (self.screen_frame.size.width - width) / 2
+        top = (size.height + total) / 2
+        left = (size.width - width) / 2
         rows = []
         for i, entry in enumerate(entries):
             rect = NSMakeRect(left, top - (i + 1) * row_h - i * gap, width, row_h)
@@ -869,14 +971,18 @@ class TunnelVision(NSObject):
             rows.append((rect, f" {key}   {short_title(entry['title'])[:58]}"))
         card = NSMakeRect(left - pad, top - total - pad, width + 2 * pad, total + 2 * pad)
         self.picker = entries
-        self.panel.setIgnoresMouseEvents_(False)
-        self.view.set_rows(rows, card, self.pick_index)
+        self.picker_view = self.views[index]
+        self.panels[index].setIgnoresMouseEvents_(False)
+        self.picker_view.set_rows(rows, card, self.pick_index)
 
     @objc.python_method
     def close_picker(self):
         self.picker = []
-        self.panel.setIgnoresMouseEvents_(True)
-        self.view.set_rows([], None, None)
+        for panel in self.panels:
+            panel.setIgnoresMouseEvents_(True)
+        if self.picker_view is not None:
+            self.picker_view.set_rows([], None, None)
+            self.picker_view = None
 
     @objc.python_method
     def pick_index(self, index):
@@ -887,7 +993,13 @@ class TunnelVision(NSObject):
 
     @objc.python_method
     def next_wallpaper(self):
-        self.show_wallpaper((self.wp_index + 1) % len(self.images))
+        """Re-assign the framed window's wallpaper rather than flipping a global one:
+        the wallpaper belongs to the window now, so this is how you choose which art
+        marks which window. With nothing framed it just moves the display on."""
+        index = (self.wp_index + 1) % len(self.images[0])
+        if self.last_entry is not None:
+            self.window_wp[self.last_entry["el"]] = index
+        self.show_wallpaper(index)
 
     @objc.python_method
     def center_front(self):
@@ -907,7 +1019,8 @@ class TunnelVision(NSObject):
     def quit(self):
         self._stop_timer()
         self.restore_all()
-        self.panel.orderOut_(None)
+        for panel in self.panels:
+            panel.orderOut_(None)
         NSApplication.sharedApplication().terminate_(None)
 
 
@@ -990,6 +1103,38 @@ def cmd_list():
                   f"{int(w)}x{int(h)}  {entry['title'][:60]}")
 
 
+def build_dock_app():
+    """Build the .app in ~/Applications. Run as a bare script the process shows up
+    as "Python" with no icon of its own; a bundle is what gives it a real Dock and
+    Cmd+Tab identity."""
+    import make_app                       # imported here: make_app imports this module
+
+    target = os.path.expanduser("~/Applications")
+    os.makedirs(target, exist_ok=True)
+    wallpapers = CONFIG["wallpapers"] or wallpaper_list([])
+    return make_app.build_app("Terminal Tunnel Vision", target, wallpapers[0], None)
+
+
+def add_to_dock(app_path):
+    """Append the app to the Dock and restart it so the tile appears. Restarting the
+    Dock is instantaneous and loses nothing, but it is visible, so this is only ever
+    called after an explicit yes."""
+    current = subprocess.run(
+        ["defaults", "read", "com.apple.dock", "persistent-apps"],
+        capture_output=True, text=True).stdout
+    if app_path in current:
+        print("already in the Dock")
+        return
+    entry = ("<dict><key>tile-data</key><dict><key>file-data</key><dict>"
+             f"<key>_CFURLString</key><string>{app_path}</string>"
+             "<key>_CFURLStringType</key><integer>0</integer>"
+             "</dict></dict></dict>")
+    subprocess.run(["defaults", "write", "com.apple.dock", "persistent-apps",
+                    "-array-add", entry], check=True)
+    subprocess.run(["killall", "Dock"], check=True)
+    print("added to the Dock")
+
+
 def cmd_setup():
     """Write config.json by asking which of the running apps are your terminals and
     your editors. Everyone's editor is different, so the built-in defaults are only
@@ -1047,7 +1192,22 @@ def cmd_setup():
     if not config["wallpapers"]:
         print(f"\nNo wallpapers listed yet: add paths to that file, drop images in "
               f"{DEFAULT_WALLPAPER_DIR}, or pass one on the command line.")
-    print("Check it with: tunnel.py --list")
+
+    if input("\nCreate an app you can launch from the Dock? [Y/n]: ").strip().lower() \
+            in ("", "y", "yes"):
+        app = build_dock_app()
+        print(f"built {app}")
+        if input("Add it to the Dock now? (restarts the Dock) [Y/n]: ").strip().lower() \
+                in ("", "y", "yes"):
+            add_to_dock(app)
+        else:
+            print("Drag it to the Dock whenever you like.")
+        print("\nOpen it once from Finder so macOS can ask for Accessibility access:")
+        print("  the bundle needs its own grant, separate from your terminal's.")
+
+    print("\nHotkeys:")
+    print_hotkeys()
+    print("\nCheck your app pools with: tunnel.py --list")
 
 
 def cmd_restore():
@@ -1121,6 +1281,9 @@ def main():
         )
         return
 
+    print("Terminal Tunnel Vision")
+    print_hotkeys()
+    sys.stdout.flush()
     CONTROLLER = TunnelVision.alloc().initWithWallpapers_(wallpapers)
     app.run()
 
