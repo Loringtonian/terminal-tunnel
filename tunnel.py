@@ -110,6 +110,7 @@ EDITOR_APPS = CONFIG["editors"]
 
 KEY_LEFT, KEY_RIGHT, KEY_DOWN, KEY_UP = 123, 124, 125, 126
 KEY_ESC, KEY_BACKSLASH, KEY_C, KEY_SPACE = 53, 42, 8, 49
+KEY_EQUAL, KEY_MINUS = 24, 27       # the +/= and -/_ keys
 # Top-row 1..9 then 0, mapped to picker rows 0..9.
 NUMBER_KEYS = {18: 0, 19: 1, 20: 2, 21: 3, 23: 4, 22: 5, 26: 6, 28: 7, 25: 8, 29: 9}
 FLAG_CTRL, FLAG_ALT, FLAG_CMD, FLAG_SHIFT = 0x40000, 0x80000, 0x100000, 0x20000
@@ -126,7 +127,7 @@ HOTKEY_HELP = (
     "right ⌥ ←  /  →      cycle terminal windows",
     "right ⌥ ↑  /  ↓      cycle editor windows",
     "right ⌥ space        window picker (then a number key)",
-    "right ⌥ \\            give this window a different wallpaper",
+    "right ⌥ +  /  -      next / previous wallpaper for this window (⌥ \\ also)",
     "right ⌥ C            centre the front window",
     "right ⌥ esc          quit, restoring your windows",
 )
@@ -732,6 +733,18 @@ class TunnelVision(NSObject):
                 self.set_hole_from_ax(frame)
             return
 
+        # The art is down and the app you were framing is back in front (Cmd+Tab,
+        # a Dock click, a click on one of its windows): that is a step back into
+        # tunnel vision, so bring the art with it. Without this the round trip
+        # away and back landed on a bare terminal: while framed, the terminal, not
+        # tunnel vision, is what the app switcher remembers you left, so Cmd+Tab
+        # back never activates tunnel vision itself.
+        if (not self.scrim_on and self.remembered_entry is not None
+                and pid == self.remembered_entry["pid"]):
+            self.show_scrim(True)
+            self.reenter(prefer_front=True)
+            return
+
         # Anything else (Chrome, Finder, an app with nothing framed): you have left.
         if self.scrim_on:
             self.restore_all()
@@ -753,10 +766,21 @@ class TunnelVision(NSObject):
                 panel.orderOut_(None)
 
     @objc.python_method
-    def reenter(self):
+    def reenter(self, prefer_front=False):
         """Put a window back in the hole on entering tunnel vision: the one you were
-        last on, or the first terminal the very first time."""
+        last on, or the first terminal the very first time. With prefer_front, a
+        pool window the app itself has put in front wins over the remembered one,
+        so coming back by clicking a different terminal frames that terminal."""
         entry = self.remembered_entry
+        if prefer_front:
+            front = self.front_window()
+            if front is not None and (entry is None or front != entry["el"]):
+                for kind in ("term", "edit"):
+                    match = next((e for e in self.refresh_pool(kind) if e["el"] == front),
+                                 None)
+                    if match is not None:
+                        entry = match
+                        break
         if entry is not None and win_frame(entry["el"]) is None:
             entry = None                       # that window has since closed
         if entry is None:
@@ -992,11 +1016,11 @@ class TunnelVision(NSObject):
             self.focus(entries[index])
 
     @objc.python_method
-    def next_wallpaper(self):
+    def next_wallpaper(self, step=1):
         """Re-assign the framed window's wallpaper rather than flipping a global one:
         the wallpaper belongs to the window now, so this is how you choose which art
         marks which window. With nothing framed it just moves the display on."""
-        index = (self.wp_index + 1) % len(self.images[0])
+        index = (self.wp_index + step) % len(self.images[0])
         if self.last_entry is not None:
             self.window_wp[self.last_entry["el"]] = index
         self.show_wallpaper(index)
@@ -1074,8 +1098,10 @@ def _tap_callback(proxy, event_type, event, refcon):
         CONTROLLER.cycle("edit", -1)
     elif code == KEY_DOWN:
         CONTROLLER.cycle("edit", 1)
-    elif code == KEY_BACKSLASH:
-        CONTROLLER.next_wallpaper()
+    elif code in (KEY_EQUAL, KEY_BACKSLASH):
+        CONTROLLER.next_wallpaper(1)
+    elif code == KEY_MINUS:
+        CONTROLLER.next_wallpaper(-1)
     elif code == KEY_C:
         CONTROLLER.center_front()
     elif code == KEY_ESC:
