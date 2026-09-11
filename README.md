@@ -1,8 +1,8 @@
-# Terminal Tunnel Vision
+# Terminal Tunnel
 
 A full-screen piece of art with a hole cut around the one window you are working in.
 
-Your real desktop is untouched. Tunnel Vision is a floating panel that sits above every other window, ignores the mouse entirely, and follows whatever window is frontmost. Summon it, work inside the hole, and everything else on the screen is art. Cycle between your terminal windows and your editor windows with one hand; each one you land on is centred for you, and put back where it was when you leave.
+Your real desktop is untouched. Terminal Tunnel is a floating panel that sits above every other window, ignores the mouse entirely, and follows whatever window is frontmost. Summon it, work inside the hole, and everything else on the screen is art. Cycle between your terminal windows and your editor windows with one hand; each one you land on is centred for you, and put back where it was when you leave.
 
 ![a terminal window sitting in the hole, the rest of the screen given over to the wallpaper](assets/screenshot.jpg)
 
@@ -17,19 +17,19 @@ They are global, so they work while you are typing in the focused window.
 | right ⌥ ← / right ⌥ →  | cycle terminal windows                                  |
 | right ⌥ ↑ / right ⌥ ↓  | cycle editor windows                                    |
 | right ⌥ Space          | window picker: click a row, or press its number         |
-| right ⌥ \              | give the framed window a different wallpaper            |
+| right ⌥ + / right ⌥ -  | next / previous wallpaper for the framed window (⌥ \ too) |
 | right ⌥ C              | centre the front window                                 |
 | right ⌥ Esc            | exit, putting every window it moved back where it was   |
 
 The same list is in the app's menu bar while it runs, and is printed when you start it from a terminal.
 
-Launching Tunnel Vision, or Cmd+Tabbing to it, hands keyboard focus straight to the framed window, so you can type without clicking first. Clicking into the framed window keeps the art up. Switching to any other app drops the art and restores the windows; coming back brings it up on the window you were last on.
+Launching Terminal Tunnel, or Cmd+Tabbing to it, hands keyboard focus straight to the framed window, so you can type without clicking first. Clicking into the framed window keeps the art up. Switching to any other app drops the art and restores the windows. Coming back brings it up again, whether you Cmd+Tab to Terminal Tunnel or straight to the terminal itself: the terminal is what the app switcher remembers you left, so Cmd+Tab-and-back lands you in the tunnel, on the window you were last on, or on whichever terminal you clicked.
 
 The two pools remember their place independently. From a terminal, ⌥ ↑ takes you to the editor you last used, and ⌥ ← takes you back to the same terminal rather than the one before it. Only a second press in the same direction steps along a pool, so alternating between a terminal and an editor bounces between exactly those two windows instead of walking you through both lists.
 
 While the picker is open it takes the keyboard: a bare number key picks that row and Esc closes it, no modifier needed.
 
-**Each window keeps its own wallpaper.** The first time you land on a window it takes the next wallpaper in your list and holds it for as long as that window is open, so arrowing back always brings up the same art. The art becomes how you recognise a window before you have read a word of it. Right ⌥ \ re-assigns the framed window, so you choose which art marks which. List more wallpapers than you have windows and no two look alike. Assignments last for the session, not across restarts.
+**Each window keeps its own wallpaper.** The first time you land on a window it takes the next wallpaper in your list and holds it for as long as that window is open, so arrowing back always brings up the same art. The art becomes how you recognise a window before you have read a word of it. Right ⌥ + and right ⌥ - step the framed window through your list (⌥ \ also steps forward), so you choose which art marks which: some art suits what is happening in a given terminal better than others. List more wallpapers than you have windows and no two look alike. Assignments last for the session, not across restarts.
 
 New windows are picked up on your next cycle and join the end of the order. Closed windows drop out, and minimised ones are skipped.
 
@@ -49,7 +49,7 @@ python3 tunnel.py
 
 It then offers to build `~/Applications/Terminal Tunnel Vision.app` and add it to your Dock. Take it. Run as a bare script the process appears as "Python" with no identity of its own, and only a bundle gives it a real Dock tile and Cmd+Tab entry. Open the app once from Finder afterwards, since a bundle needs its own Accessibility grant, separate from your terminal's.
 
-Grant Accessibility access when macOS asks (System Settings > Privacy & Security > Accessibility). Without it Tunnel Vision cannot see which window is in front or move windows. Run from a terminal, it inherits that terminal app's grant; a `.app` bundle needs its own.
+Grant Accessibility access when macOS asks (System Settings > Privacy & Security > Accessibility). Without it Terminal Tunnel cannot see which window is in front or move windows. Run from a terminal, it inherits that terminal app's grant; a `.app` bundle needs its own.
 
 Three wallpapers ship in `wallpapers/` and are used when you have not chosen any, so the third command above works on a fresh clone.
 
@@ -91,7 +91,7 @@ python3 tunnel.py --quit      # ask the running instance to restore its windows 
 python3 tunnel.py --restore   # after a crash: put windows back from the sidecar
 ```
 
-Every window Tunnel Vision moves is written to `~/.config/terminal-tunnel-vision/restore.json` before the move, so a crash or a `kill` never strands your windows off-centre.
+Every window Terminal Tunnel moves is written to `~/.config/terminal-tunnel-vision/restore.json` before the move, so a crash or a `kill` never strands your windows off-centre.
 
 ## How it works
 
