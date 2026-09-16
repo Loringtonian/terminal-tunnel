@@ -802,6 +802,7 @@ class TunnelVision(NSObject):
         x, y = self.centered_origin(frame[2], frame[3], self.screen_for_ax(frame))
         ok = set_win_pos(element, x, y)
         centred = (x, y, frame[2], frame[3])
+        self.note_centred(element, centred)
         self.set_hole_from_ax(centred)
         return centred, ok
 
@@ -943,6 +944,18 @@ class TunnelVision(NSObject):
         self.sidecar_dirty = True
 
     @objc.python_method
+    def note_centred(self, element, centred):
+        """Record where the hole put this window, as actually placed. restore_all
+        measures your own moves and resizes while framed against this, so a window
+        you grew upward goes back with its bottom edge where it was rather than
+        with the extra height hanging below its old bottom."""
+        placed = win_frame(element) or centred
+        for record in self.moved:
+            if record["el"] == element:
+                record["cx"], record["cy"] = placed[0], placed[1]
+                return
+
+    @objc.python_method
     def write_sidecar(self):
         payload = [
             {"pid": r["pid"], "title": r["title"], "x": r["x"], "y": r["y"]}
@@ -962,7 +975,17 @@ class TunnelVision(NSObject):
     @objc.python_method
     def restore_all(self):
         for record in self.moved:
-            set_win_pos(record["el"], record["x"], record["y"])
+            x, y = record["x"], record["y"]
+            current = win_frame(record["el"])
+            if current is not None and "cx" in record:
+                # Carry over whatever you did to the window while it was framed:
+                # a drag moves the restored window by the same amount, and a
+                # resize keeps the edge you did not touch. Growing a window upward
+                # lowers its AX top by the growth, so the restored top rises by
+                # the same amount and the bottom lands exactly where it was.
+                x += current[0] - record["cx"]
+                y += current[1] - record["cy"]
+            set_win_pos(record["el"], x, y)
         self.moved = []
         if os.path.exists(SIDECAR):
             os.remove(SIDECAR)
